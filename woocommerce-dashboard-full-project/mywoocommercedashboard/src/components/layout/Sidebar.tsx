@@ -129,7 +129,6 @@ export default function Sidebar() {
       <List sx={{ px: 0 }}>
         {navItems.map(({ label, path, icon: Icon }) => (
           <StyledListItem
-            button
             key={path}
             component={Link}
             to={path}
