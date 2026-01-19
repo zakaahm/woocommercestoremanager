@@ -1,10 +1,10 @@
 import { Routes, Route, Navigate } from "react-router-dom";
-import { Box } from "@mui/material";
+import {Box } from "@mui/material";
 
 import Dashboard from "../pages/Dashboard";
 import Settings from "../pages/Settings";
 import OnboardingPage from "../pages/onboarding";
-import { ProductList, ProductForm } from "../pages/Products";
+import { ProductList,} from "../pages/Products";
 import ImportCSV from "../features/import-csv/ImportCSV";
 import Topbar from "../components/layout/Topbar";
 import Sidebar from "../components/layout/Sidebar";

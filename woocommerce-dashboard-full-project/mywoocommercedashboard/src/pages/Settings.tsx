@@ -75,7 +75,9 @@ export default function Settings() {
 
       {auth?.storeUrl && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          {auth.storeUrl}
+          <a href={auth.storeUrl} target="_blank" rel="noopener noreferrer">
+        {auth.storeUrl}
+          </a>
         </Alert>
       )}
 

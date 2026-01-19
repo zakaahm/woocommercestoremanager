@@ -5,9 +5,9 @@ import axios from "./axios";
 import { Product } from "../types/product";
 
 // Fetch all paginated products
-export async function fetchProducts(page: number, perPage: number) {
+export async function fetchProducts(page: number, perPage: number, search: string = "") {
   const response = await axios.get<Product[]>("/products", {
-    params: { page, per_page: perPage }
+    params: { page, per_page: perPage, search }
   });
 
   return {
@@ -18,10 +18,10 @@ export async function fetchProducts(page: number, perPage: number) {
 }
 
 // React Query hook: list products
-export function useProducts(page = 1, perPage = 10) {
+export function useProducts(page = 1, perPage = 10, search = "") {
   return useQuery({
-    queryKey: ["products", page],
-    queryFn: () => fetchProducts(page, perPage)
+    queryKey: ["products", page, search],
+    queryFn: () => fetchProducts(page, perPage, search)
   });
 }
 
@@ -108,7 +108,7 @@ export type Attribute = {
   variation: boolean;
 };
 
-// Term voor een attribute (de daadwerkelijke waarden, bijv. “IWC”)
+// Term voor een attribute (de daadwerkelijke waarden, bijv. "IWC")
 export type AttributeTerm = {
   id: number;
   name: string;
