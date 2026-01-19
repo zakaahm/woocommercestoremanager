@@ -44,5 +44,8 @@
     "prettier": "^3.2.5",
     "typescript": "^5.5.4",
     "vite": "^5.4.2"
+  },
+    "optionalDependencies": {
+    "esbuild": "0.21.5"
   }
 }
