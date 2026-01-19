@@ -21,10 +21,10 @@ import {
   Divider,
   ImageList,
   ImageListItem,
-  ImageListItemBar,
   CircularProgress,
   Chip,
-  Alert
+  Alert,
+  LinearProgress
 } from "@mui/material";
 import {
   Delete as DeleteIcon,
@@ -37,7 +37,8 @@ import {
   Description as DescriptionIcon,
   ExpandMore as ExpandMoreIcon,
   AttachMoney as PriceIcon,
-  Warehouse as StockIcon
+  Warehouse as StockIcon,
+  Visibility as VisibilityIcon
 } from "@mui/icons-material";
 
 import { useForm, useFieldArray } from "react-hook-form";
@@ -123,36 +124,6 @@ const DragBox = styled(Box)(({ theme }) => ({
   backgroundColor: theme.palette.background.paper
 }));
 
-const ImageUploadBox = styled(Box)(({ theme }) => ({
-  border: `2px dashed ${theme.palette.grey[300]}`,
-  borderRadius: theme.spacing(1),
-  padding: theme.spacing(3),
-  textAlign: "center",
-  cursor: "pointer",
-  transition: "all 0.2s",
-  "&:hover": {
-    borderColor: theme.palette.primary.main,
-    backgroundColor: theme.palette.action.hover
-  }
-}));
-
-const ThumbnailBox = styled(Box)(({ theme }) => ({
-  position: "relative",
-  width: "100%",
-  paddingTop: "100%",
-  borderRadius: theme.spacing(1),
-  overflow: "hidden",
-  border: `1px solid ${theme.palette.grey[300]}`,
-  "& img": {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    height: "100%",
-    objectFit: "cover"
-  }
-}));
-
 /* ===================== */
 /* Component */
 /* ===================== */
@@ -164,6 +135,14 @@ export default function EditProduct() {
     "description",
     "images"
   ]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitProgress, setSubmitProgress] = useState(0);
+  
+  // Local file state - niet uploaden tot submit
+  const [featuredImageFile, setFeaturedImageFile] = useState<File | null>(null);
+  const [featuredImagePreview, setFeaturedImagePreview] = useState<string>("");
+  const [galleryFiles, setGalleryFiles] = useState<File[]>([]);
+  const [galleryPreviews, setGalleryPreviews] = useState<string[]>([]);
 
   const {
     control,
@@ -185,25 +164,169 @@ export default function EditProduct() {
     }
   });
 
-  const { fields: galleryFields, append: addGallery, remove: removeGallery } =
+  const { fields: galleryFields, remove: removeGallery } =
     useFieldArray({ control, name: "gallery_images" });
 
   const { fields: attrFields, replace: replaceAttrs, append: addAttr, remove: removeAttr } =
     useFieldArray({ control, name: "attributes" });
 
   const { data: product, isLoading, isError } = useGetProduct(id, { enabled: !!id });
-  const { mutateAsync: updateProduct, isLoading: isSaving } = useUpdateProduct();
+  const { mutateAsync: updateProduct } = useUpdateProduct();
 
   const { data: categories = [] } = useQuery(["categories"], fetchCategories);
   const { data: brands = [] } = useQuery(["brands"], fetchBrands);
   const { data: attributes = [] } = useQuery(["attributes"], fetchAttributes);
 
   const manageStock = watch("manage_stock");
-  const featuredImageSrc = watch("featured_image.src");
+  const featuredImageSrc = featuredImagePreview || watch("featured_image.src");
 
   /* ===================== */
-  /* Load product data */
+  /* Upload afbeeldingen naar WordPress */
   /* ===================== */
+  const uploadImageToWordPress = async (file: File): Promise<string> => {
+    const store = JSON.parse(localStorage.getItem("woo_dashboard_auth") || "{}");
+    const storeUrl = store.storeUrl;
+    const token = localStorage.getItem("wordpress_token");
+
+    if (!storeUrl || !token) {
+      throw new Error("Store credentials ontbreken");
+    }
+
+    // Validate file is an image
+    const validImageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    if (!validImageTypes.includes(file.type)) {
+      throw new Error(`Ongeldig afbeeldingstype: ${file.type}. Ondersteunde types: JPG, PNG, GIF, WebP`);
+    }
+
+    // Get proper file extension
+    const ext = file.name?.split(".").pop()?.toLowerCase() || "jpg";
+    const timestamp = Date.now();
+    const filename = `upload-${timestamp}.${ext}`;
+
+    const formData = new FormData();
+    formData.append("file", file, filename);
+
+    try {
+      const response = await fetch(
+        `${storeUrl.replace(/\/$/, "")}/wp-json/wp/v2/media`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${token}`
+          },
+          body: formData
+        }
+      );
+
+      const text = await response.text();
+
+      if (!response.ok) {
+        console.error("WordPress media upload error:", {
+          status: response.status,
+          response: text,
+          filename: filename,
+          fileType: file.type
+        });
+
+        // Try to parse error response
+        try {
+          const errorData = JSON.parse(text);
+          throw new Error(
+            errorData.message || `Media upload mislukt (${response.status}): ${text}`
+          );
+        } catch {
+          throw new Error(`Media upload mislukt (${response.status}): ${text}`);
+        }
+      }
+
+      const data = JSON.parse(text);
+      if (!data.source_url) {
+        throw new Error("Upload gelukt maar afbeelding-URL ontbreekt");
+      }
+      return data.source_url;
+    } catch (err) {
+      console.error("Upload request failed:", err);
+      throw err;
+    }
+  };
+  /* ===================== */
+  /* Lokale file preview handlers */
+  /* ===================== */
+  const handleFeaturedImageSelect = (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      alert("Upload alleen afbeeldingen");
+      return;
+    }
+
+    setFeaturedImageFile(file);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setFeaturedImagePreview(e.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleGalleryImagesSelect = (files: File[]) => {
+    const imageFiles = files.filter(f => f.type.startsWith("image/"));
+    
+    if (imageFiles.length === 0) {
+      alert("Geen geldige afbeeldingen gevonden");
+      return;
+    }
+
+    imageFiles.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setGalleryFiles(prev => [...prev, file]);
+        setGalleryPreviews(prev => [...prev, e.target?.result as string]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  /* ===================== */
+  /* Handle File Drop/Select */
+  /* ===================== */
+  const handleFileDrop = (files: FileList, isFeatured: boolean = false) => {
+    if (isFeatured) {
+      const file = files[0];
+      if (file) {
+        handleFeaturedImageSelect(file);
+      }
+    } else {
+      handleGalleryImagesSelect(Array.from(files));
+    }
+  };
+
+  /* ===================== */
+  /* Remove featured image */
+  /* ===================== */
+  const removeFeaturedImage = () => {
+    setFeaturedImageFile(null);
+    setFeaturedImagePreview("");
+  };
+
+  /* ===================== */
+  /* Remove gallery image */
+  /* ===================== */
+  const removeGalleryImage = (index: number) => {
+    setGalleryFiles(prev => prev.filter((_, i) => i !== index));
+    setGalleryPreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
+  /* ===================== */
+  /* Move gallery image */
+  /* ===================== */
+  const moveGalleryImage = (fromIndex: number, toIndex: number) => {
+    const newFiles = [...galleryFiles];
+    const newPreviews = [...galleryPreviews];
+    
+    [newFiles[fromIndex], newFiles[toIndex]] = [newFiles[toIndex], newFiles[fromIndex]];
+    [newPreviews[fromIndex], newPreviews[toIndex]] = [newPreviews[toIndex], newPreviews[fromIndex]];
+    
+    setGalleryFiles(newFiles);
+    setGalleryPreviews(newPreviews);
+  };
   useEffect(() => {
     if (!product) return;
 
@@ -253,33 +376,78 @@ export default function EditProduct() {
   const onSubmit = async (data: FormValues) => {
     if (!id) return;
 
-    const payload = {
-      name: data.name,
-      sku: data.sku || undefined,
-      short_description: data.short_description,
-      description: data.description,
-      regular_price: data.regular_price,
-      sale_price: data.sale_price,
-      stock_status: data.stock_status,
-      manage_stock: data.manage_stock,
-      stock_quantity: data.manage_stock ? data.stock_quantity : undefined,
-      status: data.status,
-      catalog_visibility: data.catalog_visibility,
-      categories: data.category_id ? [{ id: data.category_id }] : [],
-      images: [
-        ...(data.featured_image ? [{ src: data.featured_image.src }] : []),
-        ...data.gallery_images.map((i) => ({ src: i.src }))
-      ],
-      attributes: data.attributes.map((a) => ({
-        id: a.id,
-        options: [a.option],
-        visible: a.visible,
-        variation: a.variation
-      }))
-    };
+    try {
+      setIsSubmitting(true);
+      setSubmitProgress(0);
 
-    await updateProduct({ id: Number(id), ...payload });
-    navigate("/products");
+      const images: { src: string }[] = [];
+
+      // Upload featured image if new file selected
+      if (featuredImageFile) {
+        setSubmitProgress(10);
+        const featuredUrl = await uploadImageToWordPress(featuredImageFile);
+        images.push({ src: featuredUrl });
+        setSubmitProgress(30);
+      } else if (data.featured_image?.src) {
+        // Keep existing featured image
+        images.push({ src: data.featured_image.src });
+        setSubmitProgress(30);
+      }
+
+      // Upload new gallery images
+      if (galleryFiles.length > 0) {
+        const totalGallery = galleryFiles.length;
+        for (let i = 0; i < galleryFiles.length; i++) {
+          const galleryUrl = await uploadImageToWordPress(galleryFiles[i]);
+          images.push({ src: galleryUrl });
+          setSubmitProgress(30 + ((i + 1) / totalGallery) * 50);
+        }
+      }
+
+      // Add existing gallery images that haven't been replaced
+      data.gallery_images.forEach((img) => {
+        if (img.src) {
+          images.push({ src: img.src });
+        }
+      });
+
+      setSubmitProgress(85);
+
+      const payload = {
+        name: data.name,
+        sku: data.sku || undefined,
+        short_description: data.short_description,
+        description: data.description,
+        regular_price: data.regular_price,
+        sale_price: data.sale_price,
+        stock_status: data.stock_status,
+        manage_stock: data.manage_stock,
+        stock_quantity: data.manage_stock ? data.stock_quantity : undefined,
+        status: data.status,
+        catalog_visibility: data.catalog_visibility,
+        categories: data.category_id ? [{ id: data.category_id }] : [],
+        images: images,
+        attributes: data.attributes.map((a) => ({
+          id: a.id,
+          options: [a.option],
+          visible: a.visible,
+          variation: a.variation
+        }))
+      };
+
+      await updateProduct({ id: Number(id), ...payload });
+      setSubmitProgress(100);
+
+      setTimeout(() => {
+        navigate("/products");
+      }, 500);
+    } catch (err) {
+      console.error("Product update failed:", err);
+      alert("Fout bij bijwerken van product: " + (err as Error).message);
+      setSubmitProgress(0);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   /* ===================== */
@@ -542,40 +710,120 @@ export default function EditProduct() {
                       Uitgelichte afbeelding
                     </Typography>
 
-                    {featuredImageSrc ? (
-                      <Box position="relative" maxWidth={300}>
-                        <ThumbnailBox>
-                          <img src={featuredImageSrc} alt="Featured" />
-                        </ThumbnailBox>
-                        <IconButton
-                          onClick={() => setValue("featured_image.src", "")}
-                          sx={{
-                            position: "absolute",
-                            top: 8,
-                            right: 8,
-                            bgcolor: "background.paper"
-                          }}
-                          size="small"
-                        >
-                          <DeleteIcon color="error" fontSize="small" />
-                        </IconButton>
-                      </Box>
-                    ) : (
-                      <ImageUploadBox>
-                        <ImageIcon sx={{ fontSize: 48, color: "grey.400", mb: 1 }} />
-                        <Typography variant="body2" color="text.secondary">
-                          Klik om een afbeelding toe te voegen
-                        </Typography>
-                      </ImageUploadBox>
-                    )}
+                    <Box
+                      component="label"
+                      sx={{
+                        border: "2px dashed",
+                        borderColor: "grey.300",
+                        borderRadius: 2,
+                        p: 2,
+                        bgcolor: "grey.50",
+                        minHeight: 200,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        cursor: "pointer"
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.style.borderColor = "#1976d2";
+                        e.currentTarget.style.backgroundColor = "#e3f2fd";
+                      }}
+                      onDragLeave={(e) => {
+                        e.currentTarget.style.borderColor = "#d0d0d0";
+                        e.currentTarget.style.backgroundColor = "#fafafa";
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.style.borderColor = "#d0d0d0";
+                        e.currentTarget.style.backgroundColor = "#fafafa";
 
-                    <TextField
-                      label="Afbeelding URL"
-                      {...register("featured_image.src")}
-                      fullWidth
-                      size="small"
-                      sx={{ mt: 2 }}
-                    />
+                        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                          handleFileDrop(e.dataTransfer.files, true);
+                        }
+                      }}
+                    >
+                      <input
+                        type="file"
+                        accept="image/*"
+                        hidden
+                        onChange={(e) => {
+                          if (e.target.files?.[0]) {
+                            handleFeaturedImageSelect(e.target.files[0]);
+                          }
+                        }}
+                      />
+                      {featuredImageSrc ? (
+                        <Box position="relative" width="100%" maxWidth={300}>
+                          <Box
+                            sx={{
+                              position: "relative",
+                              width: "100%",
+                              paddingTop: "100%",
+                              borderRadius: 1,
+                              overflow: "hidden"
+                            }}
+                          >
+                            <img
+                              src={featuredImageSrc}
+                              alt="Featured"
+                              style={{
+                                position: "absolute",
+                                top: 0,
+                                left: 0,
+                                width: "100%",
+                                height: "100%",
+                                objectFit: "cover"
+                              }}
+                            />
+                          </Box>
+                          <Box
+                            sx={{
+                              position: "absolute",
+                              top: 8,
+                              right: 8,
+                              display: "flex",
+                              gap: 1
+                            }}
+                          >
+                            <IconButton
+                              size="small"
+                              sx={{ bgcolor: "background.paper" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(featuredImageSrc, "_blank");
+                              }}
+                            >
+                              <VisibilityIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton
+                              size="small"
+                              sx={{ bgcolor: "background.paper" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeFeaturedImage();
+                                setValue("featured_image.src", "");
+                              }}
+                            >
+                              <DeleteIcon color="error" fontSize="small" />
+                            </IconButton>
+                          </Box>
+                        </Box>
+                      ) : (
+                        <Box textAlign="center">
+                          <ImageIcon sx={{ fontSize: 48, color: "grey.400", mb: 1 }} />
+                          <Typography variant="body2" color="text.secondary">
+                            Sleep afbeelding hierheen of voeg URL toe
+                          </Typography>
+                        </Box>
+                      )}
+                    </Box>
+
+                    {!featuredImagePreview && (
+                      <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>
+                        💡 Sleep een afbeelding hier naartoe of klik om te selecteren
+                      </Typography>
+                    )}
                   </Box>
 
                   <Divider />
@@ -586,68 +834,206 @@ export default function EditProduct() {
                       Productgalerij
                     </Typography>
 
-                    {galleryFields.length > 0 && (
-                      <ImageList cols={3} gap={12} sx={{ mb: 2 }}>
-                        {galleryFields.map((f, i) => (
-                          <ImageListItem key={f.id}>
-                            <ThumbnailBox>
-                              {watch(`gallery_images.${i}.src`) ? (
-                                <img
-                                  src={watch(`gallery_images.${i}.src`)}
-                                  alt={`Gallery ${i + 1}`}
-                                />
-                              ) : (
-                                <Box
-                                  sx={{
-                                    position: "absolute",
-                                    inset: 0,
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    bgcolor: "grey.100"
-                                  }}
-                                >
-                                  <ImageIcon sx={{ fontSize: 32, color: "grey.400" }} />
-                                </Box>
-                              )}
-                            </ThumbnailBox>
-                            <ImageListItemBar
-                              position="top"
-                              actionIcon={
-                                <IconButton
-                                  onClick={() => removeGallery(i)}
-                                  size="small"
-                                  sx={{ bgcolor: "background.paper", m: 0.5 }}
-                                >
-                                  <DeleteIcon color="error" fontSize="small" />
-                                </IconButton>
-                              }
-                              sx={{ background: "transparent" }}
-                            />
-                          </ImageListItem>
-                        ))}
-                      </ImageList>
-                    )}
+                    <Box
+                      component="label"
+                      sx={{
+                        border: "2px dashed",
+                        borderColor: "grey.300",
+                        borderRadius: 2,
+                        p: 3,
+                        bgcolor: "grey.50",
+                        minHeight: 200,
+                        cursor: "pointer"
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.style.borderColor = "#1976d2";
+                        e.currentTarget.style.backgroundColor = "#e3f2fd";
+                      }}
+                      onDragLeave={(e) => {
+                        e.currentTarget.style.borderColor = "#d0d0d0";
+                        e.currentTarget.style.backgroundColor = "#fafafa";
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.style.borderColor = "#d0d0d0";
+                        e.currentTarget.style.backgroundColor = "#fafafa";
 
-                    <Stack spacing={1.5}>
-                      {galleryFields.map((f, i) => (
-                        <TextField
-                          key={f.id}
-                          label={`Galerij afbeelding ${i + 1}`}
-                          {...register(`gallery_images.${i}.src`)}
-                          size="small"
-                          fullWidth
-                        />
-                      ))}
-
-                      <Button
-                        onClick={() => addGallery({ src: "" })}
-                        startIcon={<AddIcon />}
-                        variant="outlined"
-                      >
-                        Afbeelding toevoegen
-                      </Button>
-                    </Stack>
+                        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                          handleGalleryImagesSelect(Array.from(e.dataTransfer.files));
+                        }
+                      }}
+                    >
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        hidden
+                        onChange={(e) => {
+                          if (e.target.files) {
+                            handleGalleryImagesSelect(Array.from(e.target.files));
+                          }
+                        }}
+                      />
+                      {galleryFiles.length > 0 || galleryFields.length > 0 ? (
+                        <DndContext
+                          collisionDetection={closestCenter}
+                          onDragEnd={(e) => {
+                            if (!e.over) return;
+                            const oldIndex = galleryPreviews.findIndex((_, i) => String(i) === e.active.id);
+                            const newIndex = galleryPreviews.findIndex((_, i) => String(i) === e.over?.id);
+                            moveGalleryImage(oldIndex, newIndex);
+                          }}
+                        >
+                          <SortableContext
+                            items={galleryPreviews.map((_, i) => String(i))}
+                            strategy={verticalListSortingStrategy}
+                          >
+                            <ImageList cols={3} gap={12}>
+                              {galleryPreviews.map((preview, i) => (
+                                <ImageListItem key={i}>
+                                  <Box
+                                    sx={{
+                                      position: "relative",
+                                      width: "100%",
+                                      paddingTop: "100%",
+                                      borderRadius: 1,
+                                      overflow: "hidden",
+                                      border: "1px solid",
+                                      borderColor: "grey.300",
+                                      bgcolor: "background.paper",
+                                      cursor: "grab",
+                                      "&:active": {
+                                        cursor: "grabbing"
+                                      }
+                                    }}
+                                  >
+                                    <img
+                                      src={preview}
+                                      alt={`Gallery ${i + 1}`}
+                                      style={{
+                                        position: "absolute",
+                                        top: 0,
+                                        left: 0,
+                                        width: "100%",
+                                        height: "100%",
+                                        objectFit: "cover"
+                                      }}
+                                    />
+                                    <Box
+                                      sx={{
+                                        position: "absolute",
+                                        top: 4,
+                                        right: 4,
+                                        display: "flex",
+                                        gap: 0.5
+                                      }}
+                                    >
+                                      <IconButton
+                                        size="small"
+                                        sx={{ bgcolor: "background.paper", opacity: 0.9 }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          window.open(preview, "_blank");
+                                        }}
+                                      >
+                                        <VisibilityIcon fontSize="small" />
+                                      </IconButton>
+                                      <IconButton
+                                        size="small"
+                                        sx={{ bgcolor: "background.paper", opacity: 0.9 }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          removeGalleryImage(i);
+                                        }}
+                                      >
+                                        <DeleteIcon color="error" fontSize="small" />
+                                      </IconButton>
+                                    </Box>
+                                  </Box>
+                                  <Typography variant="caption" sx={{ mt: 1, display: "block" }}>
+                                    Afb. {i + 1}
+                                  </Typography>
+                                </ImageListItem>
+                              ))}
+                              {galleryFields.map((f, i) => {
+                                const src = watch(`gallery_images.${i}.src`);
+                                if (!src) return null;
+                                
+                                return (
+                                  <ImageListItem key={`existing-${f.id}`}>
+                                    <Box
+                                      sx={{
+                                        position: "relative",
+                                        width: "100%",
+                                        paddingTop: "100%",
+                                        borderRadius: 1,
+                                        overflow: "hidden",
+                                        border: "1px solid",
+                                        borderColor: "grey.300",
+                                        bgcolor: "background.paper"
+                                      }}
+                                    >
+                                      <img
+                                        src={src}
+                                        alt={`Gallery existing ${i + 1}`}
+                                        style={{
+                                          position: "absolute",
+                                          top: 0,
+                                          left: 0,
+                                          width: "100%",
+                                          height: "100%",
+                                          objectFit: "cover"
+                                        }}
+                                      />
+                                      <Box
+                                        sx={{
+                                          position: "absolute",
+                                          top: 4,
+                                          right: 4,
+                                          display: "flex",
+                                          gap: 0.5
+                                        }}
+                                      >
+                                        <IconButton
+                                          size="small"
+                                          sx={{ bgcolor: "background.paper", opacity: 0.9 }}
+                                          onClick={() => {
+                                            window.open(src, "_blank");
+                                          }}
+                                        >
+                                          <VisibilityIcon fontSize="small" />
+                                        </IconButton>
+                                        <IconButton
+                                          size="small"
+                                          sx={{ bgcolor: "background.paper", opacity: 0.9 }}
+                                          onClick={() => removeGallery(i)}
+                                        >
+                                          <DeleteIcon color="error" fontSize="small" />
+                                        </IconButton>
+                                      </Box>
+                                    </Box>
+                                    <Typography variant="caption" sx={{ mt: 1, display: "block" }}>
+                                      Bestaand {i + 1}
+                                    </Typography>
+                                  </ImageListItem>
+                                );
+                              })}
+                            </ImageList>
+                          </SortableContext>
+                        </DndContext>
+                      ) : (
+                        <Box textAlign="center" py={4}>
+                          <ImageIcon sx={{ fontSize: 64, color: "grey.300", mb: 2 }} />
+                          <Typography variant="body1" color="text.secondary" gutterBottom>
+                            Nog geen galerij afbeeldingen
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Sleep afbeeldingen hierheen of klik om te selecteren
+                          </Typography>
+                        </Box>
+                      )}
+                    </Box>
                   </Box>
                 </Stack>
               </AccordionDetails>
@@ -789,12 +1175,20 @@ export default function EditProduct() {
                   type="submit"
                   variant="contained"
                   size="large"
-                  startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
+                  startIcon={isSubmitting ? <CircularProgress size={20} /> : <SaveIcon />}
                   fullWidth
-                  disabled={isSaving}
+                  disabled={isSubmitting}
                 >
-                  {isSaving ? "Opslaan..." : "Wijzigingen opslaan"}
+                  {isSubmitting ? "Bijwerken..." : "Wijzigingen opslaan"}
                 </Button>
+                {isSubmitting && submitProgress > 0 && (
+                  <Box sx={{ mt: 2 }}>
+                    <LinearProgress variant="determinate" value={submitProgress} />
+                    <Typography variant="caption" sx={{ mt: 1, display: "block" }}>
+                      {submitProgress}%
+                    </Typography>
+                  </Box>
+                )}
               </Stack>
             </Paper>
           </Grid>
